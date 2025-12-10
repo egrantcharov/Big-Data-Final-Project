@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Taxi Live Stats</title>
+    <link rel="stylesheet" href="elegant-aero.css">
+    <link rel="stylesheet" href="table.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background-color: #f8f9fa;
+        }
+        h1 {
+            margin-bottom: 0.2em;
+        }
+        .summary-card {
+            border: 1px solid #ddd;
+            padding: 16px 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            background-color: #ffffff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.06);
+        }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px 24px;
+        }
+        .summary-list {
+            list-style-type: disc;
+            padding-left: 20px;
+            margin: 0;
+        }
+        .summary-list li {
+            margin-bottom: 4px;
+            font-size: 0.95rem;
+        }
+        .summary-list strong {
+            font-weight: 600;
+        }
+        #top5-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+        }
+        #top5-table th, #top5-table td {
+            border: 1px solid #ddd;
+            padding: 8px 10px;
+            text-align: left;
+        }
+        #top5-table th {
+            background-color: #f4f4f4;
+        }
+        #details-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+        }
+        #details-table th, #details-table td {
+            border: 1px solid #ddd;
+            padding: 6px 8px;
+            text-align: left;
+        }
+        #details-table th {
+            background-color: #f4f4f4;
+        }
+        #hour-chart, #dow-chart {
+            margin-top: 12px;
+            background-color: #ffffff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 8px;
+        }
+        .chart-note {
+            font-size: 0.9rem;
+            color: #555;
+            margin-top: 6px;
+            margin-bottom: 18px;
+        }
+    </style>
+</head>
+<body>
+<h1>Taxi Live Statistics</h1>
+<p>Aggregated from the streaming job over the last month.</p>
+
+<div class="summary-card">
+    <h2>Key Insights</h2>
+    <div id="summary-loading">Loading data…</div>
+    <div id="summary-content" style="display:none;">
+        <div class="summary-grid">
+            <div>
+                <ul class="summary-list">
+                    <li><strong>Total trips in dataset:</strong> <span id="total-trips"></span></li>
+                    <li><strong>Trips during busiest hour:</strong> <span id="busiest-hour-count"></span></li>
+                    <li><strong>Total day trips (06:00–18:00):</strong> <span id="day-trips"></span></li>
+                    <li><strong>Total night trips (18:00–06:00):</strong> <span id="night-trips"></span></li>
+                    <li><strong>Day vs night difference:</strong> <span id="day-night-diff"></span></li>
+                </ul>
+            </div>
+            <div>
+                <ul class="summary-list">
+                    <li><strong>Busiest hour of day:</strong> <span id="busiest-hour"></span></li>
+                    <li><strong>Weekday trips:</strong> <span id="weekday-trips"></span></li>
+                    <li><strong>Weekend trips:</strong> <span id="weekend-trips"></span></li>
+                    <li><strong>Weekday vs weekend difference:</strong> <span id="weekday-weekend-diff"></span></li>
+                    <li><strong>Top 5 busiest windows:</strong> each accounts for roughly 0.2% of all trips; congestion is spread across many windows rather than a single spike.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<h2>Trips by Hour of Day</h2>
+<canvas id="hour-chart" height="120"></canvas>
+<p class="chart-note">Evening peak around 19:00; morning ramp-up between 07:00–09:00.</p>
+
+<h2>Trips by Day of Week</h2>
+<canvas id="dow-chart" height="120"></canvas>
+<p class="chart-note">Weekday demand clearly exceeds weekend levels, with mid-week (Wed–Fri) being the heaviest.</p>
+
+<h2>Top 5 Busiest Windows</h2>
+<table id="top5-table">
+    <thead>
+    <tr>
+        <th>Window start</th>
+        <th>Window end</th>
+        <th>Trip count</th>
+        <th>Share of trips</th>
+        <th>Day type</th>
+    </tr>
+    </thead>
+    <tbody id="top5-body">
+    </tbody>
+</table>
+
+<h2>Sample of 10-Minute Aggregation Windows</h2>
+<table id="details-table">
+    <thead>
+    <tr>
+        <th>Window start</th>
+        <th>Window end</th>
+        <th>Trip count</th>
+    </tr>
+    </thead>
+    <tbody id="details-body">
+    </tbody>
+</table>
+
+<script>
+    async function loadTaxiStats() {
+        const summaryLoading = document.getElementById('summary-loading');
+        const summaryContent = document.getElementById('summary-content');
+
+        try {
+            const resp = await fetch('/api/taxi/live_stats');
+            const data = await resp.json();
+            const rows = data.rows || [];
+
+            if (rows.length === 0) {
+                summaryLoading.textContent = 'No data available.';
+                return;
+            }
+
+            // ----- Aggregation structures -----
+            const byHour = new Array(24).fill(0);
+            const byDay = new Array(7).fill(0); // 0=Sun ... 6=Sat
+            let totalTrips = 0;
+            let totalDay = 0;
+            let totalNight = 0;
+            let totalWeekday = 0;
+            let totalWeekend = 0;
+
+            for (const r of rows) {
+                const count = Number(r.count) || 0;
+                totalTrips += count;
+                const startStr = r.window_start;
+                const d = new Date(startStr.replace(' ', 'T'));
+
+                if (!isNaN(d.getTime())) {
+                    const h = d.getHours();
+                    const dayOfWeek = d.getDay(); // 0 = Sunday, 6 = Saturday
+
+                    byHour[h] += count;
+                    byDay[dayOfWeek] += count;
+
+                    // Day vs night
+                    if (h >= 6 && h < 18) {
+                        totalDay += count;
+                    } else {
+                        totalNight += count;
+                    }
+
+                    // Weekday vs weekend
+                    if (dayOfWeek === 0 || dayOfWeek === 6) {
+                        totalWeekend += count;
+                    } else {
+                        totalWeekday += count;
+                    }
+                }
+            }
+
+            // ----- Busiest hour -----
+            let bestHour = 0;
+            let bestCount = 0;
+            for (let h = 0; h < 24; h++) {
+                if (byHour[h] > bestCount) {
+                    bestCount = byHour[h];
+                    bestHour = h;
+                }
+            }
+
+            const dayShare = totalTrips === 0 ? 0 : (totalDay / totalTrips) * 100;
+            const nightShare = totalTrips === 0 ? 0 : (totalNight / totalTrips) * 100;
+            const weekdayShare = totalTrips === 0 ? 0 : (totalWeekday / totalTrips) * 100;
+            const weekendShare = totalTrips === 0 ? 0 : (totalWeekend / totalTrips) * 100;
+            const busiestShare = totalTrips === 0 ? 0 : (bestCount / totalTrips) * 100;
+
+            function formatHour(h) {
+                const pad = (x) => x.toString().padStart(2, '0');
+                const end = (h + 1) % 24;
+                return `${pad(h)}:00–${pad(end)}:00`;
+            }
+
+            // ----- Fill summary -----
+            document.getElementById('total-trips').textContent = totalTrips.toLocaleString();
+            document.getElementById('busiest-hour').textContent = formatHour(bestHour);
+            document.getElementById('busiest-hour-count').textContent =
+                `${bestCount.toLocaleString()} (${busiestShare.toFixed(1)}% of trips)`;
+            document.getElementById('day-trips').textContent =
+                `${totalDay.toLocaleString()} (${dayShare.toFixed(1)}% of trips)`;
+            document.getElementById('night-trips').textContent =
+                `${totalNight.toLocaleString()} (${nightShare.toFixed(1)}% of trips)`;
+            document.getElementById('weekday-trips').textContent =
+                `${totalWeekday.toLocaleString()} (${weekdayShare.toFixed(1)}% of trips)`;
+            document.getElementById('weekend-trips').textContent =
+                `${totalWeekend.toLocaleString()} (${weekendShare.toFixed(1)}% of trips)`;
+
+            const dnDiff = totalDay - totalNight;
+            const dnPct = totalNight === 0 ? 0 : (dnDiff / totalNight) * 100;
+            const dnLabel = dnDiff >= 0 ? 'more' : 'fewer';
+            document.getElementById('day-night-diff').textContent =
+                `${Math.abs(dnDiff).toLocaleString()} ${dnLabel} trips in the day (~${dnPct.toFixed(1)}%)`;
+
+            const wwDiff = totalWeekday - totalWeekend;
+            const wwPct = totalWeekend === 0 ? 0 : (wwDiff / totalWeekend) * 100;
+            const wwLabel = wwDiff >= 0 ? 'more' : 'fewer';
+            document.getElementById('weekday-weekend-diff').textContent =
+                `${Math.abs(wwDiff).toLocaleString()} ${wwLabel} trips on weekdays (~${wwPct.toFixed(1)}%)`;
+
+            summaryLoading.style.display = 'none';
+            summaryContent.style.display = '';
+
+            // ----- Hour-of-day bar chart -----
+            const ctx = document.getElementById('hour-chart').getContext('2d');
+            const hourLabels = Array.from({length: 24}, (_, h) =>
+                h.toString().padStart(2, '0') + ':00'
+            );
+
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: hourLabels,
+                    datasets: [{
+                        label: 'Trips per hour',
+                        data: byHour
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false },
+                        title: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Hour of day' },
+                            grid: { display: false }
+                        },
+                        y: {
+                            title: { display: true, text: 'Number of trips' },
+                            grid: { color: 'rgba(0,0,0,0.08)' }
+                        }
+                    }
+                }
+            });
+
+            // ----- Day-of-week bar chart -----
+            const ctxDow = document.getElementById('dow-chart').getContext('2d');
+            const dowLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            new Chart(ctxDow, {
+                type: 'bar',
+                data: {
+                    labels: dowLabels,
+                    datasets: [{
+                        label: 'Trips per day',
+                        data: byDay,
+                        backgroundColor: dowLabels.map((_, idx) =>
+                            (idx === 0 || idx === 6) ? 'rgba(54, 162, 235, 0.7)' : 'rgba(54, 162, 235, 0.4)'
+                        ),
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false },
+                        title: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Day of week' },
+                            grid: { display: false }
+                        },
+                        y: {
+                            title: { display: true, text: 'Number of trips' },
+                            grid: { color: 'rgba(0,0,0,0.08)' }
+                        }
+                    }
+                }
+            });
+
+            // ----- Top 5 busiest windows table -----
+            const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            function formatWindowPart(startStr, endStr) {
+                const ds = new Date(startStr.replace(' ', 'T'));
+                const de = new Date(endStr.replace(' ', 'T'));
+                if (isNaN(ds.getTime()) || isNaN(de.getTime())) {
+                    return { startLabel: startStr, endLabel: endStr };
+                }
+                const pad = (x) => x.toString().padStart(2, '0');
+                const day = dayNames[ds.getDay()];
+                const startLabel = `${day} ${pad(ds.getHours())}:${pad(ds.getMinutes())}`;
+                const endLabel = `${pad(de.getHours())}:${pad(de.getMinutes())}`;
+                return { startLabel, endLabel };
+            }
+            const top5 = [...rows].sort((a, b) => Number(b.count) - Number(a.count)).slice(0, 5);
+            const top5Body = document.getElementById('top5-body');
+            top5Body.innerHTML = '';
+            top5.forEach(r => {
+                const count = Number(r.count) || 0;
+                const share = totalTrips === 0 ? 0 : (count / totalTrips) * 100;
+                const d = new Date(r.window_start.replace(' ', 'T'));
+                let dayType = '';
+                if (!isNaN(d.getTime())) {
+                    const dow = d.getDay();
+                    dayType = (dow === 0 || dow === 6) ? 'Weekend' : 'Weekday';
+                }
+                const tr = document.createElement('tr');
+                const labels = formatWindowPart(r.window_start, r.window_end);
+                tr.innerHTML = `
+                <td>${labels.startLabel}</td>
+                <td>${labels.endLabel}</td>
+                <td>${count.toLocaleString()}</td>
+                <td>${share.toFixed(2)}%</td>
+                <td>${dayType}</td>
+            `;
+                top5Body.appendChild(tr);
+            });
+
+            // ----- Sample window table -----
+            const body = document.getElementById('details-body');
+            body.innerHTML = '';
+            rows.slice(0, 50).forEach(r => {
+                const tr = document.createElement('tr');
+                const labels = formatWindowPart(r.window_start, r.window_end);
+                tr.innerHTML = `
+                <td>${labels.startLabel}</td>
+                <td>${labels.endLabel}</td>
+                <td>${r.count}</td>
+            `;
+                body.appendChild(tr);
+            });
+
+        } catch (e) {
+            console.error(e);
+            summaryLoading.textContent = 'Error loading data.';
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', loadTaxiStats);
+</script>
+</body>
+</html>

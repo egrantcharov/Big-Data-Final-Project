@@ -32,18 +32,7 @@ function rowToMap(row) {
 	});
 	return stats;
 }
-/*
-hclient.table('weather_delays_by_route').row('ORDAUS').get((error, value) => {
-	console.info(rowToMap(value))
-	console.info(value)
-})
 
-
-hclient.table('weather_delays_by_route').row('ORDAUS').get((error, value) => {
-	console.info(rowToMap(value))
-	console.info(value)
-})
-*/
 
 
 
@@ -91,9 +80,7 @@ app.get('/delays.html', async function (req, res) {
         res.send(html);
     }
 
-    // Treat as airport code only if exactly 3 A–Z letters.
     const isIATA = (s) => /^[A-Z]{3}$/.test(s);
-// Case A: route (origin + dest are valid IATA)
     if (isIATA(origin) && isIATA(dest)) {
         const routeKey = origin + dest;
         hclient.table('weather_delays_by_route').row(routeKey).get(function (err, cells) {
@@ -103,7 +90,6 @@ app.get('/delays.html', async function (req, res) {
         return;
     }
 
-// Case B: origin-only (origin is IATA; dest missing/invalid)
     if (isIATA(origin)) {
         hclient.table('weather_delays_by_route').scan(
             {filter: {type: "PrefixFilter", value: origin}, maxVersions: 1},
@@ -125,7 +111,6 @@ app.get('/delays.html', async function (req, res) {
     return res.status(400).send("Provide a 3-letter origin (and optional 3-letter dest).");
 });
 
-// Simple API to expose taxi_live_stats.csv as JSON
 app.get('/api/taxi/live_stats', function (req, res) {
     filesystem.readFile(TAXI_CSV_PATH, 'utf8', function (err, data) {
         if (err) {
